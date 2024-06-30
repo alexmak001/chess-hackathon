@@ -92,8 +92,8 @@ def main(args, timer):
         latest_path = os.readlink(latest_sym)
 
         if args.is_master:
-            print(f"Loading checkpoint from {args.latest_path}")
-        checkpoint = torch.load(args.latest_path, map_location=f"cuda:{args.device_id}")
+            print(f"Loading checkpoint from {latest_path}")
+        checkpoint = torch.load(latest_path, map_location=f"cuda:{args.device_id}")
 
         model.module.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
