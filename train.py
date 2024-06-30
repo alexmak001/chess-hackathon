@@ -20,6 +20,7 @@ from cycling_utils import (
     InterruptableDistributedSampler,
     MetricsTracker,
     atomic_torch_save,
+    AtomicDirectory
 )
 from utils.LAMB import Lamb
 
@@ -51,14 +52,15 @@ def main(args, timer):
         print("Hostname:", hostname)
     timer.report("Setup for distributed training")
 
-    args.save_chk_path = args.save_dir / "checkpoint.pt"
+    args.save_chk_path = args.save_dir # / "checkpoint.pt"
     if args.load_dir and not os.path.isfile(args.save_chk_path):
         # load from load path if one passed and save check path does not exist
         args.load_chk_path = args.load_dir
     else:
         # otherwise presume to save and load from the same place
         args.load_chk_path = args.save_chk_path
-    args.save_chk_path.parent.mkdir(parents=True, exist_ok=True)
+    # args.save_chk_path.parent.mkdir(parents=True, exist_ok=True)
+    saver = AtomicDirectory(args.save_chk_path)
     timer.report("Validated checkpoint path")
 
     data_path = "/data"
@@ -84,10 +86,14 @@ def main(args, timer):
     optimizer = Lamb(model.parameters(), lr=args.lr)
     metrics = {"train": MetricsTracker(), "test": MetricsTracker()}
 
-    if os.path.isfile(args.load_chk_path):
+    # if os.path.isfile(args.load_chk_path):
+    latest_sym = os.path.join(args.save_chk_path, saver.symlink_name)
+    if os.path.exists(latest_sym):
+        latest_path = os.readlink(latest_sym)
+
         if args.is_master:
-            print(f"Loading checkpoint from {args.load_chk_path}")
-        checkpoint = torch.load(args.load_chk_path, map_location=f"cuda:{args.device_id}")
+            print(f"Loading checkpoint from {args.latest_path}")
+        checkpoint = torch.load(args.latest_path, map_location=f"cuda:{args.device_id}")
 
         model.module.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
@@ -113,6 +119,10 @@ def main(args, timer):
                 # Determine the current step
                 step = train_dataloader.sampler.progress // train_dataloader.batch_size
                 is_last_step = (step + 1) == train_steps_per_epoch
+
+                # Prepare checkpoint directory
+                if ((step + 1) % save_steps == 0 or is_last_step) and args.is_master:
+                    checkpoint_directory = saver.prepare_checkpoint_directory()
 
                 evals = logish_transform(evals) # suspect this might help
                 boards, evals = boards.to(args.device_id), evals.to(args.device_id)
@@ -159,8 +169,9 @@ def main(args, timer):
                             "test_sampler": test_dataloader.sampler.state_dict(),
                             "metrics": metrics
                         },
-                        args.save_chk_path,
+                        os.path.join(checkpoint_directory, "checkpoint.pt"),
                     )
+                    saver.atomic_symlink(checkpoint_directory)
 
             with test_dataloader.sampler.in_epoch(epoch):
 
@@ -174,6 +185,10 @@ def main(args, timer):
                         # Determine the current step
                         step = test_dataloader.sampler.progress // test_dataloader.batch_size
                         is_last_step = (step + 1) == test_steps_per_epoch
+
+                        # Prepare checkpoint directory
+                        if ((step + 1) % save_steps == 0 or is_last_step) and args.is_master:
+                            checkpoint_directory = saver.prepare_checkpoint_directory()
 
                         evals = logish_transform(evals) # suspect this might help
                         boards, evals = boards.to(args.device_id), evals.to(args.device_id)
@@ -216,8 +231,9 @@ def main(args, timer):
                                     "test_sampler": test_dataloader.sampler.state_dict(),
                                     "metrics": metrics
                                 },
-                                args.save_chk_path,
+                                os.path.join(checkpoint_directory, "checkpoint.pt"),
                             )
+                            saver.atomic_symlink(checkpoint_directory)
 
 
 timer.report("Defined functions")
